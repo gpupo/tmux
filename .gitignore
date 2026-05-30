@@ -1,0 +1,17 @@
+# logs gerados por bin/tool-window.sh (TOOL_WINDOW_DEBUG=1)
+*.log
+
+# backups criados pelo setup.sh
+*.backup.*
+
+# arquivos de estado do sessionize e ssh-session
+.local/
+
+# diretório de plugins do TPM (gerenciado pelo próprio tmux)
+plugins/
+
+# artefatos de editores
+.DS_Store
+.idea/
+*.swp
+*.swo
