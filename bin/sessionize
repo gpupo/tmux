@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  sessionize — Fuzzy finder de sessões tmux com zoxide + histórico
+#  sessionize — Fuzzy finder de sessões tmux com zoxide + histórico + path
 # =============================================================================
 #
 #  Uso: sessionize [caminho]
@@ -11,6 +11,19 @@
 #  [recent]  Sessões fechadas recentemente (histórico local)
 #  [zoxide]  Diretórios frequentes/recentes do zoxide
 #  [work]    Subdiretórios diretos de ~/work
+#  [path]    Autocomplete de filesystem — ativado ao digitar /, ~ ou ./
+#
+#  MODO PATH (autocomplete)
+#  ────────────────────────
+#  Ao digitar um prefixo de caminho, a lista troca automaticamente para
+#  mostrar subdiretórios do filesystem. O fzf filtra em tempo real.
+#
+#    /Us<Tab>       → lista /Users/*
+#    ~/wo<Tab>      → lista ~/work/* ~/worktrees/* …
+#    ./src<Tab>     → lista ./src/*
+#
+#  Pressione Enter sobre um item para usá-lo, ou complete a digitação
+#  e pressione Enter — o caminho digitado é aceito mesmo sem seleção.
 #
 #  HISTÓRICO
 #  ─────────
@@ -18,7 +31,7 @@
 #    $XDG_DATA_HOME/tmux-sessionizer/history  (padrão: ~/.local/share/…)
 #  O histórico mantém as últimas 200 entradas.
 #
-#  DEPENDÊNCIAS: tmux, zoxide, fzf
+#  DEPENDÊNCIAS: tmux, fzf, zoxide (opcional)
 
 HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-sessionizer/history"
 mkdir -p "$(dirname "$HISTORY_FILE")"
@@ -26,12 +39,10 @@ touch "$HISTORY_FILE"
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-# Retorna os caminhos de todas as sessões tmux ativas
 active_paths() {
     tmux list-sessions -F "#{pane_current_path}" 2>/dev/null | sort -u
 }
 
-# Registra diretório no histórico (mantém últimas 200 linhas)
 log_dir() {
     local dir="$1"
     echo "$dir" >> "$HISTORY_FILE"
@@ -39,11 +50,10 @@ log_dir() {
         && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
 }
 
-# ── Montar lista para o fzf ───────────────────────────────────────────────
+# ── Montar lista estática (recent + zoxide + work) ────────────────────────
 
 ACTIVE=$(active_paths)
 
-# [recent] — últimas 5 sessões do histórico não abertas atualmente
 recent_inactive=$(
     tac "$HISTORY_FILE" \
     | awk '!seen[$0]++' \
@@ -55,7 +65,6 @@ recent_inactive=$(
     | head -5
 )
 
-# [zoxide] — diretórios frequentes (filtra configs/docs pessoais)
 zoxide_dirs=$(
     zoxide query -l \
     | grep -v ".dot\|.config\|Documents\|.local" 2>/dev/null \
@@ -64,13 +73,11 @@ zoxide_dirs=$(
     done
 )
 
-# [work] — diretórios de primeiro nível em ~/work
 work_dirs=$(
     [[ -d "$HOME/work" ]] || exit 0
     find "$HOME/work" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -u
 )
 
-# Labels coloridos para o fzf (ANSI)
 labeled_recent=$(
     echo "$recent_inactive" | grep -v "^$" \
     | awk '{printf "  \033[1;33m[recent]\033[0m  %s\n", $0}'
@@ -90,24 +97,73 @@ labeled_work=$(
     | awk '{printf "  \033[0;36m[work]\033[0m     %s\n", $0}'
 )
 
-combined=$(printf "%s\n%s\n%s" \
-    "$labeled_recent" "$labeled_zoxide" "$labeled_work" | grep -v "^$")
+# ── Temp file com a lista estática ───────────────────────────────────────
+# Necessário para o reload dinâmico poder restaurar a lista original.
+TMPLIST=$(mktemp)
+trap 'rm -f "$TMPLIST"' EXIT
+printf "%s\n%s\n%s" "$labeled_recent" "$labeled_zoxide" "$labeled_work" \
+    | grep -v "^$" > "$TMPLIST"
 
 # ── Seleção ───────────────────────────────────────────────────────────────
 
 if [[ $# -eq 1 ]]; then
     selected="$1"
 else
-    selected=$(
-        echo "$combined" \
+    # Comando de reload executado pelo fzf a cada tecla digitada.
+    # {q} é substituído pelo fzf com o query atual antes de rodar o shell.
+    #
+    # Modo PATH: ativado quando query começa com /, ~ ou ./
+    #   - query termina com /  → lista esse diretório
+    #   - query sem /  final   → lista o diretório pai (fzf filtra o resto)
+    # Modo LISTA: query normal → devolve a lista estática do TMPLIST
+    _RELOAD=$(cat << 'RELOAD'
+q={q}
+expanded="${q/#\~/$HOME}"
+if [[ "$q" == /* || "$q" == ~* || "$q" == ./* ]]; then
+    if [[ "$expanded" == */ ]]; then
+        base="$expanded"
+    else
+        base="$(dirname "$expanded")"
+    fi
+    if [[ -d "$base" ]]; then
+        find "$base" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+            | sort \
+            | awk '{printf "  \033[0;35m[path]\033[0m    %s\n", $0}'
+    fi
+else
+    cat 'TMPLIST_PLACEHOLDER'
+fi
+RELOAD
+    )
+    # Injeta o caminho real do TMPLIST no comando de reload
+    _RELOAD="${_RELOAD/TMPLIST_PLACEHOLDER/$TMPLIST}"
+
+    # --print-query: primeira linha = query digitado, segunda = item selecionado
+    # Permite aceitar um caminho digitado mesmo sem selecionar da lista.
+    fzf_out=$(
+        cat "$TMPLIST" \
         | fzf --ansi \
               --reverse \
               --no-sort \
+              --print-query \
               --prompt "  session » " \
-              --header $' \033[1m[recent]\033[0m = fechadas recentemente  |  \033[0;34m[zoxide]\033[0m = frequentes  |  \033[0;36m[work]\033[0m = ~/work/*\n' \
+              --header $' \033[1m[recent]\033[0m recentes  \033[0;34m[zoxide]\033[0m frequentes  \033[0;36m[work]\033[0m ~/work  \033[0;35m[path]\033[0m digite / ou ~\n' \
               --height 50% \
-        | awk '{print $NF}'
+              --bind "change:reload($_RELOAD)"
     )
+
+    query=$(echo "$fzf_out" | head -1)
+    match=$(echo "$fzf_out" | tail -1 | awk '{print $NF}')
+
+    if [[ -n "$match" && "$match" != "$query" ]]; then
+        # Item selecionado da lista
+        selected="$match"
+    elif [[ -n "$query" && -d "${query/#\~/$HOME}" ]]; then
+        # Caminho digitado manualmente e existe como diretório
+        selected="${query/#\~/$HOME}"
+    else
+        exit 0
+    fi
 fi
 
 [[ -z "$selected" ]] && exit 0
@@ -116,7 +172,6 @@ fi
 
 log_dir "$selected"
 
-# Nome da sessão: basename em lowercase, espaços e pontos viram _
 session_name=$(basename "$selected" | tr '[:upper:]' '[:lower:]' | tr '. ' '__')
 
 if ! tmux has-session -t="$session_name" 2>/dev/null; then
