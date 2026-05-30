@@ -18,54 +18,66 @@
 #  Isso garante que cada ferramenta tenha exatamente uma janela dedicada
 #  e que o preset "dev" e o modo TOOLS (C-g) compartilhem as mesmas janelas.
 #
-#  OBSERVABILIDADE
-#  ───────────────
-#  Cada ação é registrada em:
-#    $XDG_STATE_HOME/tool-window.log  (padrão: ~/.local/state/tool-window.log)
-#  Sobreponha com: TOOL_WINDOW_LOG=/outro/caminho tool-window.sh ...
+#  OBSERVABILIDADE (opt-in)
+#  ────────────────────────
+#  Por padrão o log está DESLIGADO para máxima performance.
+#  Para habilitar, exporte a variável antes de rodar:
 #
-#  DEPENDÊNCIAS: tmux
+#    TOOL_WINDOW_DEBUG=1 tool-window.sh LazyGit lazygit /path
+#
+#  O log é gravado em:
+#    ${XDG_STATE_HOME:-~/.local/state}/tool-window.log
+#  Ou sobreponha com: TOOL_WINDOW_LOG=/outro/caminho
+#
+#  DEPENDÊNCIAS: tmux, bash ≥ 5 (para $EPOCHREALTIME no modo debug)
 
 set -euo pipefail
 
-# ── Log ───────────────────────────────────────────────────────────────────
-LOG_FILE="${TOOL_WINDOW_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/tool-window.log}"
-mkdir -p "$(dirname "$LOG_FILE")"
-
-_log() {
-    local level="$1"; shift
-    printf '%s [%s] tool-window: %s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$*" >> "$LOG_FILE"
-}
-
-_ts_start=$(date +%s%3N)
-
-# ── Argumentos ────────────────────────────────────────────────────────────
 WINDOW_NAME="$1"
 COMMAND="$2"
-DIR="${3:-$(tmux display-message -p '#{pane_current_path}')}"
+DIR="${3:-}"
 
-_log INFO "start window_name=${WINDOW_NAME} command=${COMMAND} dir=${DIR}"
+# ── Log (só inicializa se TOOL_WINDOW_DEBUG=1) ────────────────────────────
+if [[ -n "${TOOL_WINDOW_DEBUG:-}" ]]; then
+    LOG_FILE="${TOOL_WINDOW_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/tool-window.log}"
+    mkdir -p "$(dirname "$LOG_FILE")"
+    _ts_start="${EPOCHREALTIME}"   # builtin bash 5+ — zero fork
 
-# ── Lógica principal ──────────────────────────────────────────────────────
+    _log() {
+        local level="$1"; shift
+        # printf com EPOCHREALTIME: preciso e sem fork externo
+        printf '%.6f [%s] tool-window: %s\n' \
+            "${EPOCHREALTIME}" "$level" "$*" >> "$LOG_FILE"
+    }
 
-# Procura janela pelo nome na sessão atual
-WINDOW=$(tmux list-windows -F '#{window_index}:#{window_name}' \
-    | grep ":${WINDOW_NAME}$" \
-    | head -1 \
-    | cut -d: -f1) || true
+    _log INFO "start window_name=${WINDOW_NAME} command=${COMMAND} dir=${DIR:-<pane>}"
+else
+    _log() { :; }   # no-op
+fi
+
+# ── Diretório (fallback para o painel atual só se não foi passado) ─────────
+# Evita fork desnecessário de `tmux display-message` quando o chamador
+# já fornece o caminho (como todos os binds em tmux.conf fazem).
+[[ -z "$DIR" ]] && DIR="$(tmux display-message -p '#{pane_current_path}')"
+
+# ── Busca janela pelo nome usando filtro nativo do tmux ───────────────────
+# -f '#{==:...}' filtra server-side: evita pipeline grep+cut e é mais seguro
+# com nomes que contenham caracteres especiais.
+WINDOW=$(tmux list-windows \
+    -F '#{window_index}' \
+    -f "#{==:#{window_name},${WINDOW_NAME}}" \
+    | head -1)
 
 if [[ -n "$WINDOW" ]]; then
-    # Janela já existe → apenas navega até ela
     _log INFO "action=reuse window_index=${WINDOW}"
-    tmux display-message "→ ${WINDOW_NAME}"
     tmux select-window -t "$WINDOW"
 else
-    # Janela não existe → cria com o comando no diretório especificado
     _log INFO "action=create window_name=${WINDOW_NAME}"
-    tmux display-message "→ abrindo ${COMMAND}"
     tmux new-window -c "$DIR" -n "$WINDOW_NAME" "$COMMAND"
 fi
 
-_ts_end=$(date +%s%3N)
-_log INFO "done duration_ms=$(( _ts_end - _ts_start ))"
+if [[ -n "${TOOL_WINDOW_DEBUG:-}" ]]; then
+    _elapsed=$(awk -v s="${_ts_start}" -v e="${EPOCHREALTIME}" \
+        'BEGIN { printf "%.0f", (e - s) * 1000 }')
+    _log INFO "done duration_ms=${_elapsed}"
+fi
