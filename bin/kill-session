@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  kill-session — Mata todas as sessões tmux exceto a atual
+# =============================================================================
+#
+#  Acionado por: C-s → k  (modo SESSIONS)
+#
+#  Comportamento:
+#   - Se não houver sessões ativas, sai silenciosamente.
+#   - Usa `tmux kill-session -a` que preserva a sessão corrente
+#     e destrói todas as outras.
+#
+#  ATENÇÃO: esta operação é irreversível. Processos nas sessões eliminadas
+#  são encerrados imediatamente.
+
+set -euo pipefail
+
+if ! tmux has-session 2>/dev/null; then
+    exit 0
+fi
+
+tmux kill-session -a
+tmux display-message "✔ Sessões encerradas"

@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  sessionize — Fuzzy finder de sessões tmux com zoxide + histórico
+# =============================================================================
+#
+#  Uso: sessionize [caminho]
+#        Se `caminho` for fornecido, cria/conecta direto sem o fzf.
+#
+#  FONTES DE DIRETÓRIOS (por ordem de prioridade no fzf)
+#  ──────────────────────────────────────────────────────
+#  [recent]  Sessões fechadas recentemente (histórico local)
+#  [zoxide]  Diretórios frequentes/recentes do zoxide
+#  [work]    Subdiretórios diretos de ~/work
+#
+#  HISTÓRICO
+#  ─────────
+#  Cada diretório acessado via este script é salvo em:
+#    $XDG_DATA_HOME/tmux-sessionizer/history  (padrão: ~/.local/share/…)
+#  O histórico mantém as últimas 200 entradas.
+#
+#  DEPENDÊNCIAS: tmux, zoxide, fzf
+
+HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-sessionizer/history"
+mkdir -p "$(dirname "$HISTORY_FILE")"
+touch "$HISTORY_FILE"
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+# Retorna os caminhos de todas as sessões tmux ativas
+active_paths() {
+    tmux list-sessions -F "#{pane_current_path}" 2>/dev/null | sort -u
+}
+
+# Registra diretório no histórico (mantém últimas 200 linhas)
+log_dir() {
+    local dir="$1"
+    echo "$dir" >> "$HISTORY_FILE"
+    tail -200 "$HISTORY_FILE" > "${HISTORY_FILE}.tmp" \
+        && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
+}
+
+# ── Montar lista para o fzf ───────────────────────────────────────────────
+
+ACTIVE=$(active_paths)
+
+# [recent] — últimas 5 sessões do histórico não abertas atualmente
+recent_inactive=$(
+    tac "$HISTORY_FILE" \
+    | awk '!seen[$0]++' \
+    | while IFS= read -r dir; do
+        [[ ! -d "$dir" ]] && continue
+        echo "$ACTIVE" | grep -qxF "$dir" && continue
+        echo "$dir"
+    done \
+    | head -5
+)
+
+# [zoxide] — diretórios frequentes (filtra configs/docs pessoais)
+zoxide_dirs=$(
+    zoxide query -l \
+    | grep -v ".dot\|.config\|Documents\|.local" 2>/dev/null \
+    | while IFS= read -r dir; do
+        [[ -d "$dir" ]] && echo "$dir"
+    done
+)
+
+# [work] — diretórios de primeiro nível em ~/work
+work_dirs=$(
+    [[ -d "$HOME/work" ]] || exit 0
+    find "$HOME/work" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -u
+)
+
+# Labels coloridos para o fzf (ANSI)
+labeled_recent=$(
+    echo "$recent_inactive" | grep -v "^$" \
+    | awk '{printf "  \033[1;33m[recent]\033[0m  %s\n", $0}'
+)
+
+labeled_zoxide=$(
+    comm -23 \
+        <(echo "$zoxide_dirs" | sort -u) \
+        <({ echo "$recent_inactive"; echo "$ACTIVE"; } | grep -v "^$" | sort -u) \
+    | awk '{printf "  \033[0;34m[zoxide]\033[0m  %s\n", $0}'
+)
+
+labeled_work=$(
+    comm -23 \
+        <(echo "$work_dirs" | sort -u) \
+        <({ echo "$recent_inactive"; echo "$ACTIVE"; echo "$zoxide_dirs"; } | grep -v "^$" | sort -u) \
+    | awk '{printf "  \033[0;36m[work]\033[0m     %s\n", $0}'
+)
+
+combined=$(printf "%s\n%s\n%s" \
+    "$labeled_recent" "$labeled_zoxide" "$labeled_work" | grep -v "^$")
+
+# ── Seleção ───────────────────────────────────────────────────────────────
+
+if [[ $# -eq 1 ]]; then
+    selected="$1"
+else
+    selected=$(
+        echo "$combined" \
+        | fzf --ansi \
+              --reverse \
+              --no-sort \
+              --prompt "  session » " \
+              --header $' \033[1m[recent]\033[0m = fechadas recentemente  |  \033[0;34m[zoxide]\033[0m = frequentes  |  \033[0;36m[work]\033[0m = ~/work/*\n' \
+              --height 50% \
+        | awk '{print $NF}'
+    )
+fi
+
+[[ -z "$selected" ]] && exit 0
+
+# ── Criar / conectar sessão ───────────────────────────────────────────────
+
+log_dir "$selected"
+
+# Nome da sessão: basename em lowercase, espaços e pontos viram _
+session_name=$(basename "$selected" | tr '[:upper:]' '[:lower:]' | tr '. ' '__')
+
+if ! tmux has-session -t="$session_name" 2>/dev/null; then
+    tmux new-session -ds "$session_name" -c "$selected"
+fi
+
+if [[ -z "${TMUX:-}" ]]; then
+    tmux attach -t "$session_name"
+else
+    tmux switch-client -t "$session_name"
+fi

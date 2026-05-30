@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  cht — Cheatsheet interativo via cht.sh
+# =============================================================================
+#
+#  Usa fzf para selecionar uma linguagem ou comando, depois consulta cht.sh.
+#
+#  CONFIGURAÇÃO
+#  ────────────
+#  Crie dois arquivos em ~/.config/tmux/:
+#
+#    .tmux-cht-languages  — uma linguagem por linha (python, go, rust…)
+#    .tmux-cht-command    — um comando por linha  (git, curl, jq…)
+#
+#  EXEMPLOS DE USO
+#  ───────────────
+#    Linguagem (python → "list comprehension"):  abre em nova janela
+#    Comando   (git   → "rebase"):               abre via less
+#
+#  DEPENDÊNCIAS: fzf, curl, tmux
+
+set -euo pipefail
+
+LANG_FILE="$HOME/.config/tmux/.tmux-cht-languages"
+CMD_FILE="$HOME/.config/tmux/.tmux-cht-command"
+
+# Garante que os arquivos de config existem
+if [[ ! -f "$LANG_FILE" || ! -f "$CMD_FILE" ]]; then
+    echo "⚠  Crie os arquivos de configuração:"
+    echo "     $LANG_FILE"
+    echo "     $CMD_FILE"
+    exit 1
+fi
+
+selected=$(cat "$LANG_FILE" "$CMD_FILE" | fzf --prompt="cht.sh » ")
+
+if [[ -z "${selected:-}" ]]; then
+    exit 0
+fi
+
+read -r -p "Query: " query
+
+if grep -Fqs "$selected" "$LANG_FILE"; then
+    # Linguagem → abre nova janela tmux com curl + paginação automática
+    query=${query// /+}
+    tmux neww bash -c \
+      "echo \"curl cht.sh/$selected/$query/\" & curl cht.sh/$selected/$query & while [ : ]; do sleep 1; done"
+else
+    # Comando → exibe via less (sem abrir nova janela)
+    tmux neww bash -c "curl -s cht.sh/$selected~$query | less"
+fi
