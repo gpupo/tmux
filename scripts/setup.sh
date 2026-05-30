@@ -61,8 +61,14 @@ link "$REPO_DIR/tmux.conf" "$HOME/.tmux.conf"
 # ── 2. ~/.config/tmux ─────────────────────────────────────────────────────
 # O tmux.conf referencia scripts como $HOME/.config/tmux/bin/<script>
 # e documentos como $HOME/.config/tmux/docs/<arquivo>.
+# Se o repo já foi clonado em ~/.config/tmux, o symlink seria circular — pula.
+CONFIG_TMUX="$HOME/.config/tmux"
 mkdir -p "$HOME/.config"
-link "$REPO_DIR" "$HOME/.config/tmux"
+if [[ "$REPO_DIR" == "$CONFIG_TMUX" ]]; then
+    ok "Repo já está em $CONFIG_TMUX — symlink desnecessário"
+else
+    link "$REPO_DIR" "$CONFIG_TMUX"
+fi
 
 # ── 3. Permissões dos scripts ─────────────────────────────────────────────
 chmod +x "$REPO_DIR"/bin/*
